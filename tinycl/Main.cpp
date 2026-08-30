@@ -1,177 +1,205 @@
+#define NAOCHUE_TINYCL_USE_IOURING
+#include "DumbDefer.h"
+#include "Global.h"
 #include "liburing.h"
 #include <chrono>
-#include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
-#include <poll.h>
 #include <print>
-#include <string>
+#include <sys/poll.h>
 #include <system_error>
 #include <termios.h>
+#include <unistd.h>
 
-template <typename T> struct DumbDefer {
-  T Calle;
+static struct termios OriginTerm;
 
-  DumbDefer(T &&Calle) : Calle(Calle) {}
-  ~DumbDefer() { Calle(); }
-};
+constexpr size_t TerminalReplySize = 1024;
 
-template <typename T> DumbDefer(T) -> DumbDefer<T>;
+int DevTTY = -1;
 
-constexpr long long NANOSEC_UPDATE_CLOCK = 100000000ULL;
+void term_restore(std::error_code *Err) {
+  if (tcsetattr(DevTTY, TCSANOW, &OriginTerm) != 0) {
+    if (Err) {
+      *Err = std::error_code{errno, std::generic_category()};
+    }
 
-enum TagTag { TAGTAG_TIMEOUT = 1, TAGTAG_DEVTTY = 2 };
-
-static struct termios S;
-
-std::error_code Restore(int DEVTTY) {
-  if (tcsetattr(DEVTTY, TCSANOW, &S) < 0) {
-    return std::error_code{errno, std::generic_category()};
+    return;
   }
-
-  return {};
 }
 
-[[nodiscard]] std::error_code Enter(int DEVTTY) {
-  if (!isatty(DEVTTY)) {
-    return std::error_code{errno, std::generic_category()};
+[[nodiscard]] bool term_enter(std::error_code &Err) {
+  if (!isatty(DevTTY)) {
+    Err = errorCodeFromERRNO();
+    return false;
   }
 
-  if (tcgetattr(DEVTTY, &S) < 0) {
-    return std::error_code{errno, std::generic_category()};
+  if (tcgetattr(DevTTY, &OriginTerm) != 0) {
+    Err = errorCodeFromERRNO();
+    return false;
   }
 
-  struct termios Copy = S;
-
+  auto Copy = OriginTerm;
   Copy.c_lflag &= ~(ECHO | ICANON);
-  Copy.c_cc[VMIN] = 0;
+  Copy.c_cc[VMIN] = 1;
   Copy.c_cc[VTIME] = 0;
 
-  if (tcsetattr(DEVTTY, TCSANOW, &Copy) < 0) {
-    return std::error_code{errno, std::generic_category()};
+  if (tcsetattr(DevTTY, TCSANOW, &Copy) != 0) {
+    Err = errorCodeFromERRNO();
+    return false;
   }
 
-  return {};
+  return true;
 }
 
-int main(int argc, char **argv) {
-  constexpr std::string_view BeginError = "tincl: Error";
-  auto Now = std::chrono::system_clock::now();
-  std::string ClockStr = std::format("\r{:%H:%M:%S}", Now);
+inline void updateClock(bool UTC = false) {
+  static auto UTCNow = std::chrono::system_clock::now();
+  UTCNow = std::chrono::system_clock::now();
+  if (UTC) {
+    std::print(stdout, "{:%H:%M:%S}", UTCNow);
+  } else {
+    auto LocalTime =
+        std::chrono::zoned_time{std::chrono::current_zone(), UTCNow};
+    std::print(stdout, "{:%H:%M:%S}", LocalTime);
+  }
+}
 
-  auto DEVTTY = open("/dev/tty", O_WRONLY | O_NONBLOCK);
-  if (DEVTTY < 0) {
-    std::println(stderr, "{}: {}", BeginError, strerror(errno));
+// TODO: CLI Parser???
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+int main() {
+  // open /dev/tty
+  if (DevTTY = open("/dev/tty", O_NONBLOCK | O_CLOEXEC | O_RDWR);
+      DevTTY == -1) {
+    std::println(stderr,
+                 NAOCHUE_TINCL_BEGINERROR ": Failed to open /dev/tty: {}",
+                 strerror(errno));
     return 1;
   }
-  DumbDefer CleanupDEVTTY_{[&]() { close(DEVTTY); }};
+  DumbDefer Cleanup_devtty([]() { close(DevTTY); });
 
-  if (auto E = Enter(DEVTTY)) {
-    std::println(stderr, "{}: {}", BeginError, E.message());
+  // option via environment variable. Why not?
+  std::error_code Err;
+  if (std::getenv("NAOCHUE_CLEAR_SCREEN")) {
+    if (!writeAll(DevTTY, ClearScreen.data(), ClearScreen.size(), Err)) {
+      std::println(stderr,
+                   NAOCHUE_TINCL_BEGINERROR
+                   ": Failed to write seq clear screen: {}",
+                   Err.message());
+      return 1;
+    }
+  }
+
+  // enter mode
+  if (!term_enter(Err)) {
+    std::println(stderr, NAOCHUE_TINCL_BEGINERROR ": {}", Err.message());
     return 1;
   }
-  DumbDefer CleanupTerminal_{[&]() {
-    auto E = Restore(DEVTTY);
-    (void)E;
-  }};
+  DumbDefer Cleanup_terminal([]() { term_restore(nullptr); });
 
+#ifdef NAOCHUE_TINYCL_USE_IOURING
   struct io_uring Ring;
-  auto Err = io_uring_queue_init(8, &Ring, 0);
-  if (Err != 0) {
-    std::println(stderr, "{}: {}", BeginError, strerror(-Err));
+  if (auto Err = io_uring_queue_init(4, &Ring, 0); Err < 0) {
+    std::println(stderr,
+                 NAOCHUE_TINCL_BEGINERROR ": Failed to open /dev/tty: {}",
+                 strerror(-Err));
     return 1;
   }
-  DumbDefer CleanupRing_{[&]() { io_uring_queue_exit(&Ring); }};
+  DumbDefer Cleanup_Ring([&]() { io_uring_queue_exit(&Ring); });
 
-  struct __kernel_timespec Ts{.tv_sec = 1, .tv_nsec = 0};
+  struct __kernel_timespec SpecTimer{.tv_sec = 0, .tv_nsec = 100000000};
 
-  auto registerTimeout = [&]() -> int {
+  enum Tag : __u64 { Tag_Tick, Tag_Key };
+
+  auto registerTimerAwait = [&]() -> bool {
     auto *Sqe = io_uring_get_sqe(&Ring);
     if (!Sqe) {
-      std::println(stderr, "{}: IO_URING: SQE NULL", BeginError);
-      return 1;
+      return false;
     }
 
-    // timeout
-    io_uring_prep_timeout(Sqe, &Ts, 0, 0);
-    io_uring_sqe_set_data(Sqe, (void *)TAGTAG_TIMEOUT);
+    io_uring_prep_timeout(Sqe, &SpecTimer, 0, 0);
+    io_uring_sqe_set_data64(Sqe, Tag_Tick);
 
-    return 0;
+    return true;
   };
 
-  auto registerPoll = [&]() {
+  auto *TerminalInput = static_cast<char *>(malloc(TerminalReplySize));
+  if (!TerminalInput) {
+    std::println(stderr, NAOCHUE_TINCL_BEGINERROR
+                 ": Failed to allocate terminal input buffer");
+    return 1;
+  }
+  DumbDefer Cleanup_Buffer([&]() { free(TerminalInput); });
+
+  auto registerKeyAwait = [&]() -> bool {
     auto *Sqe = io_uring_get_sqe(&Ring);
     if (!Sqe) {
-      std::println(stderr, "{}: IO_URING: SQE NULL", BeginError);
-      return 1;
+      return false;
     }
 
-    // poll /dev/tty
-    io_uring_prep_poll_add(Sqe, DEVTTY, POLLIN);
-    io_uring_sqe_set_data(Sqe, (void *)TAGTAG_DEVTTY);
+    io_uring_prep_read(Sqe, DevTTY, TerminalInput, TerminalReplySize, 0);
+    io_uring_sqe_set_data64(Sqe, Tag_Key);
 
-    return 0;
+    return true;
   };
 
-  auto Fail = registerTimeout();
-  if (Fail != 0) {
-    return Fail;
+  if (!registerKeyAwait() || !registerTimerAwait()) {
+    std::println(stderr, NAOCHUE_TINCL_BEGINERROR ": Out of SQE");
+    return 1;
   }
 
-  Fail = registerPoll();
-  if (Fail != 0) {
-    return Fail;
+  if (auto EInt = io_uring_submit(&Ring); EInt < 0) {
+    std::println(stderr, NAOCHUE_TINCL_BEGINERROR ": {}", strerror(-EInt));
+    return 1;
+  } else if (EInt != 2) {
+    std::println(stderr, NAOCHUE_TINCL_BEGINERROR ": Missing SQE");
+    return 1;
   }
 
-  io_uring_submit(&Ring);
-
-  bool Fine = true;
-  while (Fine) {
-    struct io_uring_cqe *Cqe;
-    Err = io_uring_wait_cqe(&Ring, &Cqe);
-    if (Err != 0) {
-      std::println(stderr, "{}: {}", BeginError, strerror(-Err));
+  bool Running = true;
+  while (Running) {
+    io_uring_cqe *Cqe;
+    if (auto EIn = io_uring_wait_cqe(&Ring, &Cqe); EIn < 0) {
+      std::println(stderr, NAOCHUE_TINCL_BEGINERROR ": {}", strerror(-EIn));
       return 1;
     }
 
-    if (Cqe->res < 0 && !(Cqe->res & POLLIN) && Cqe->res != -ETIME) {
-      std::println(stderr, "{}: {}", BeginError, strerror(-Cqe->res));
+    if (Cqe->res < 0 && Cqe->res != -ETIME) {
+      std::println(stderr, NAOCHUE_TINCL_BEGINERROR ": {}",
+                   strerror(-Cqe->res));
       return 1;
     }
 
-    switch (static_cast<TagTag>(
-        reinterpret_cast<uintptr_t>(io_uring_cqe_get_data(Cqe)))) {
-    case TAGTAG_DEVTTY: {
-      char buf[1024];
-      while (read(DEVTTY, buf, sizeof(buf)) > 0)
-        ;
+    auto What = static_cast<Tag>(io_uring_cqe_get_data64(Cqe));
+    auto DataOfTrans = Cqe->res;
 
-      Fine = false;
-      io_uring_cqe_seen(&Ring, Cqe);
+    io_uring_cqe_seen(&Ring, Cqe);
+
+    switch (What) {
+    case Tag_Key: {
+      if (DataOfTrans > 0) {
+        Running = false;
+      }
       break;
     }
-    case TAGTAG_TIMEOUT: {
-      io_uring_cqe_seen(&Ring, Cqe);
-
-      Now = std::chrono::system_clock::now();
-      ClockStr = std::format("\r{:%H:%M:%S}", Now);
-
-      auto E = write(DEVTTY, ClockStr.data(), ClockStr.size());
-      if (E < 0) {
-        std::println(stderr, "{}: Write failed: {}", BeginError,
-                     strerror(errno));
+    case Tag_Tick:
+      updateClock();
+      std::print("\r");
+      std::fflush(stdout);
+      if (!registerTimerAwait()) {
+        std::println(stderr, NAOCHUE_TINCL_BEGINERROR ": Out of SQE");
         return 1;
       }
-
-      Fail = registerTimeout();
-      if (Fail != 0)
-        return 1;
-
-      io_uring_submit(&Ring);
       break;
     }
+
+    if (auto EInt = io_uring_submit(&Ring); EInt < 0) {
+      std::println(stderr, NAOCHUE_TINCL_BEGINERROR ": {}", strerror(-EInt));
+      return 1;
     }
   }
+#endif
+
+  std::print("\n");
 
   return 0;
 }
