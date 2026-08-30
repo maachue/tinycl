@@ -7,7 +7,7 @@
 #include <system_error>
 #include <unistd.h>
 
-#define NAOCHUE_TINCL_BEGINERROR "tinycl: Error"
+#define NAOCHUE_TINYCL_BEGINERROR "tinycl: Error"
 
 constexpr std::string_view ClearScreen = "\x1b[2J\x1b[H";
 
@@ -20,7 +20,11 @@ inline std::error_code errorCodeFromERRNO() {
 inline bool writeAll(int Fd, const char *Bytes, size_t BytesSize,
                      std::error_code &Err) {
   while (auto N = write(Fd, Bytes, BytesSize)) {
-    if (N == -1 && errno != EINTR) {
+    if (N == -1) {
+      if (errno == EINTR || errno == EWOULDBLOCK || errno == EAGAIN) {
+        continue;
+      }
+
       Err = errorCodeFromERRNO();
       return false;
     }
@@ -29,6 +33,7 @@ inline bool writeAll(int Fd, const char *Bytes, size_t BytesSize,
       break;
     }
 
+    Bytes += N;
     BytesSize -= N;
   }
 

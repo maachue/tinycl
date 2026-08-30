@@ -2,12 +2,14 @@
 #define NAOCHUE_TINYCL_DUMBDEFER_H
 
 #include <concepts>
+#include <type_traits>
+#include <utility>
 
 template <typename T>
-  requires std::invocable<T>
+  requires std::invocable<T> && std::same_as<std::invoke_result_t<T>, void>
 class DumbDefer {
 public:
-  explicit DumbDefer(T &&Fn) : Fn(Fn) {}
+  explicit DumbDefer(T &&Fn) : Fn(std::forward<T>(Fn)) {}
   ~DumbDefer() { Fn(); }
 
   // no copy
@@ -19,7 +21,7 @@ public:
   template <typename O> DumbDefer(DumbDefer<O> &&) = delete;
 
 private:
-  T Fn;
+  std::decay_t<T> Fn;
 };
 
 template <typename T>

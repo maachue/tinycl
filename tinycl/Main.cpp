@@ -68,10 +68,9 @@ inline void updateClock(bool UTC = false) {
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 int main() {
   // open /dev/tty
-  if (DevTTY = open("/dev/tty", O_NONBLOCK | O_CLOEXEC | O_RDWR);
-      DevTTY == -1) {
+  if (DevTTY = open("/dev/tty", O_CLOEXEC | O_RDWR); DevTTY == -1) {
     std::println(stderr,
-                 NAOCHUE_TINCL_BEGINERROR ": Failed to open /dev/tty: {}",
+                 NAOCHUE_TINYCL_BEGINERROR ": Failed to open /dev/tty: {}",
                  strerror(errno));
     return 1;
   }
@@ -82,7 +81,7 @@ int main() {
   if (std::getenv("NAOCHUE_CLEAR_SCREEN")) {
     if (!writeAll(DevTTY, ClearScreen.data(), ClearScreen.size(), Err)) {
       std::println(stderr,
-                   NAOCHUE_TINCL_BEGINERROR
+                   NAOCHUE_TINYCL_BEGINERROR
                    ": Failed to write seq clear screen: {}",
                    Err.message());
       return 1;
@@ -91,7 +90,7 @@ int main() {
 
   // enter mode
   if (!term_enter(Err)) {
-    std::println(stderr, NAOCHUE_TINCL_BEGINERROR ": {}", Err.message());
+    std::println(stderr, NAOCHUE_TINYCL_BEGINERROR ": {}", Err.message());
     return 1;
   }
   DumbDefer Cleanup_terminal([]() { term_restore(nullptr); });
@@ -100,7 +99,7 @@ int main() {
   struct io_uring Ring;
   if (auto Err = io_uring_queue_init(4, &Ring, 0); Err < 0) {
     std::println(stderr,
-                 NAOCHUE_TINCL_BEGINERROR ": Failed to open /dev/tty: {}",
+                 NAOCHUE_TINYCL_BEGINERROR ": Failed to open /dev/tty: {}",
                  strerror(-Err));
     return 1;
   }
@@ -124,7 +123,7 @@ int main() {
 
   auto *TerminalInput = static_cast<char *>(malloc(TerminalReplySize));
   if (!TerminalInput) {
-    std::println(stderr, NAOCHUE_TINCL_BEGINERROR
+    std::println(stderr, NAOCHUE_TINYCL_BEGINERROR
                  ": Failed to allocate terminal input buffer");
     return 1;
   }
@@ -143,15 +142,15 @@ int main() {
   };
 
   if (!registerKeyAwait() || !registerTimerAwait()) {
-    std::println(stderr, NAOCHUE_TINCL_BEGINERROR ": Out of SQE");
+    std::println(stderr, NAOCHUE_TINYCL_BEGINERROR ": Out of SQE");
     return 1;
   }
 
   if (auto EInt = io_uring_submit(&Ring); EInt < 0) {
-    std::println(stderr, NAOCHUE_TINCL_BEGINERROR ": {}", strerror(-EInt));
+    std::println(stderr, NAOCHUE_TINYCL_BEGINERROR ": {}", strerror(-EInt));
     return 1;
   } else if (EInt != 2) {
-    std::println(stderr, NAOCHUE_TINCL_BEGINERROR ": Missing SQE");
+    std::println(stderr, NAOCHUE_TINYCL_BEGINERROR ": Missing SQE");
     return 1;
   }
 
@@ -159,12 +158,12 @@ int main() {
   while (Running) {
     io_uring_cqe *Cqe;
     if (auto EIn = io_uring_wait_cqe(&Ring, &Cqe); EIn < 0) {
-      std::println(stderr, NAOCHUE_TINCL_BEGINERROR ": {}", strerror(-EIn));
+      std::println(stderr, NAOCHUE_TINYCL_BEGINERROR ": {}", strerror(-EIn));
       return 1;
     }
 
     if (Cqe->res < 0 && Cqe->res != -ETIME) {
-      std::println(stderr, NAOCHUE_TINCL_BEGINERROR ": {}",
+      std::println(stderr, NAOCHUE_TINYCL_BEGINERROR ": {}",
                    strerror(-Cqe->res));
       return 1;
     }
@@ -186,14 +185,14 @@ int main() {
       std::print("\r");
       std::fflush(stdout);
       if (!registerTimerAwait()) {
-        std::println(stderr, NAOCHUE_TINCL_BEGINERROR ": Out of SQE");
+        std::println(stderr, NAOCHUE_TINYCL_BEGINERROR ": Out of SQE");
         return 1;
       }
       break;
     }
 
     if (auto EInt = io_uring_submit(&Ring); EInt < 0) {
-      std::println(stderr, NAOCHUE_TINCL_BEGINERROR ": {}", strerror(-EInt));
+      std::println(stderr, NAOCHUE_TINYCL_BEGINERROR ": {}", strerror(-EInt));
       return 1;
     }
   }
