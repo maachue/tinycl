@@ -1,0 +1,13 @@
+test.tmp
+*.rej
+
+build/
+build_san/
+out/
+out_san/
+
+.cache/
+.bak
+.vscode/
+
+compile_commands.json

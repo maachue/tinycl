@@ -1,0 +1,6 @@
+---
+BasedOnStyle: LLVM
+
+IndentPPDirectives: AfterHash
+PPIndentWidth: 2
+...
