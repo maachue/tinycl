@@ -6,8 +6,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
+#include <poll.h>
 #include <print>
-#include <sys/poll.h>
 #include <system_error>
 #include <termios.h>
 #include <unistd.h>
