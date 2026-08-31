@@ -4,11 +4,16 @@
 
 A tiny tty-clock.
 
-It likes this:
+It looks like this:
 
 ```
 10:30:16.xxxx
 ```
+
+## Required
+
+This program only runs on Linux.
+Required kernel 5.1 or later with `liburing` installed.
 
 ## Usage
 
