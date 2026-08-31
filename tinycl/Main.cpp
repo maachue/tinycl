@@ -1,13 +1,18 @@
+#include <cerrno>
+#include <sys/poll.h>
 #define NAOCHUE_TINYCL_USE_IOURING
+
 #include "DumbDefer.h"
 #include "Global.h"
 #include "liburing.h"
 #include <chrono>
+#include <csignal>
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
 #include <poll.h>
 #include <print>
+#include <sys/signalfd.h>
 #include <system_error>
 #include <termios.h>
 #include <unistd.h>
@@ -76,6 +81,26 @@ int main() {
   }
   DumbDefer Cleanup_devtty([]() { close(DevTTY); });
 
+  // mask signals
+  sigset_t Sig;
+  sigemptyset(&Sig);
+  sigaddset(&Sig, SIGINT);
+  sigaddset(&Sig, SIGTSTP);
+  sigaddset(&Sig, SIGCONT);
+  if (sigprocmask(SIG_BLOCK, &Sig, nullptr) < 0) {
+    std::println(stderr,
+                 NAOCHUE_TINYCL_BEGINERROR ": Failed to mask signal: {}",
+                 strerror(errno));
+    return 1;
+  }
+
+  int SFd = signalfd(-1, &Sig, 0);
+  if (SFd == -1) {
+    std::println(stderr,
+                 NAOCHUE_TINYCL_BEGINERROR ": Failed to create signalfd: {}",
+                 strerror(errno));
+  }
+
   // option via environment variable. Why not?
   std::error_code Err;
   if (std::getenv("NAOCHUE_CLEAR_SCREEN")) {
@@ -105,9 +130,22 @@ int main() {
   }
   DumbDefer Cleanup_Ring([&]() { io_uring_queue_exit(&Ring); });
 
-  struct __kernel_timespec SpecTimer{.tv_sec = 0, .tv_nsec = 100000000};
+  enum Tag : __u64 { Tag_Tick, Tag_Key, Tag_Sig };
 
-  enum Tag : __u64 { Tag_Tick, Tag_Key };
+  struct signalfd_siginfo Sfsi;
+
+  auto registerSignalAwait = [&]() -> bool {
+    auto *Sqe = io_uring_get_sqe(&Ring);
+    if (!Sqe) {
+      return false;
+    }
+
+    io_uring_prep_read(Sqe, SFd, &Sfsi, sizeof(struct signalfd_siginfo), 0);
+    io_uring_sqe_set_data64(Sqe, Tag_Sig);
+    return true;
+  };
+
+  struct __kernel_timespec SpecTimer{.tv_sec = 0, .tv_nsec = 100000000};
 
   auto registerTimerAwait = [&]() -> bool {
     auto *Sqe = io_uring_get_sqe(&Ring);
@@ -141,7 +179,7 @@ int main() {
     return true;
   };
 
-  if (!registerKeyAwait() || !registerTimerAwait()) {
+  if (!registerKeyAwait() || !registerTimerAwait() || !registerSignalAwait()) {
     std::println(stderr, NAOCHUE_TINYCL_BEGINERROR ": Out of SQE");
     return 1;
   }
@@ -149,7 +187,7 @@ int main() {
   if (auto EInt = io_uring_submit(&Ring); EInt < 0) {
     std::println(stderr, NAOCHUE_TINYCL_BEGINERROR ": {}", strerror(-EInt));
     return 1;
-  } else if (EInt != 2) {
+  } else if (EInt != 3) {
     std::println(stderr, NAOCHUE_TINYCL_BEGINERROR ": Missing SQE");
     return 1;
   }
@@ -158,13 +196,12 @@ int main() {
   while (Running) {
     io_uring_cqe *Cqe;
     if (auto EIn = io_uring_wait_cqe(&Ring, &Cqe); EIn < 0) {
-      std::println(stderr, NAOCHUE_TINYCL_BEGINERROR ": {}", strerror(-EIn));
-      return 1;
-    }
-
-    if (Cqe->res < 0 && Cqe->res != -ETIME) {
-      std::println(stderr, NAOCHUE_TINYCL_BEGINERROR ": {}",
-                   strerror(-Cqe->res));
+      if (EIn == -EINTR) {
+        continue;
+      }
+      std::println(
+          stderr, NAOCHUE_TINYCL_BEGINERROR ": Wait for cqe returned error: {}",
+          strerror(-EIn));
       return 1;
     }
 
@@ -177,6 +214,56 @@ int main() {
     case Tag_Key: {
       if (DataOfTrans > 0) {
         Running = false;
+      }
+      break;
+    }
+    case Tag_Sig: {
+      if (DataOfTrans < 0) {
+        std::println(stderr,
+                     NAOCHUE_TINYCL_BEGINERROR ": Failed to read signals: {}",
+                     strerror(-DataOfTrans));
+        return 1;
+      }
+
+      if (DataOfTrans != sizeof(struct signalfd_siginfo)) {
+        std::println(stderr, NAOCHUE_TINYCL_BEGINERROR
+                     ": Failed to read signals: Expected size");
+        return 1;
+      }
+
+      if (Sfsi.ssi_signo == SIGINT) {
+        Running = false;
+      } else if (Sfsi.ssi_signo == SIGCONT) {
+        if (!term_enter(Err)) {
+          std::println(stderr, NAOCHUE_TINYCL_BEGINERROR ": {}", Err.message());
+          return 1;
+        }
+      } else if (Sfsi.ssi_signo == SIGTSTP) {
+        term_restore(nullptr);
+        sigset_t tstp_set;
+        sigemptyset(&tstp_set);
+        sigaddset(&tstp_set, SIGTSTP);
+        if (sigprocmask(SIG_UNBLOCK, &tstp_set, nullptr) < 0) {
+          std::println(stderr,
+                       NAOCHUE_TINYCL_BEGINERROR
+                       ": Failed to unblock signal: {}",
+                       strerror(errno));
+          return 1;
+        }
+
+        raise(SIGTSTP);
+
+        if (sigprocmask(SIG_BLOCK, &tstp_set, nullptr) < 0) {
+          std::println(stderr,
+                       NAOCHUE_TINYCL_BEGINERROR ": Failed to block signal: {}",
+                       strerror(errno));
+          return 1;
+        }
+      }
+
+      if (!registerSignalAwait()) {
+        std::println(stderr, NAOCHUE_TINYCL_BEGINERROR ": Out of SQE");
+        return 1;
       }
       break;
     }
