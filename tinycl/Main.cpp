@@ -1,10 +1,9 @@
-#include <cerrno>
-#include <sys/poll.h>
 #define NAOCHUE_TINYCL_USE_IOURING
 
 #include "DumbDefer.h"
 #include "Global.h"
 #include "liburing.h"
+#include <cerrno>
 #include <chrono>
 #include <csignal>
 #include <cstdlib>
